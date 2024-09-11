@@ -7,6 +7,7 @@ used internally by Bleak.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 from typing import (
@@ -27,16 +28,20 @@ from weakref import WeakKeyDictionary
 from dbus_fast import BusType, Message, MessageType, Variant, unpack_variants
 from dbus_fast.aio.message_bus import MessageBus
 
-from ...exc import BleakError
+from ...exc import BleakDBusError, BleakError
 from ..service import BleakGATTServiceCollection
 from . import defs
 from .advertisement_monitor import AdvertisementMonitor, OrPatternLike
 from .characteristic import BleakGATTCharacteristicBlueZDBus
-from .defs import Device1, GattService1, GattCharacteristic1, GattDescriptor1
+from .defs import Device1, GattCharacteristic1, GattDescriptor1, GattService1
 from .descriptor import BleakGATTDescriptorBlueZDBus
 from .service import BleakGATTServiceBlueZDBus
 from .signals import MatchRules, add_match
-from .utils import assert_reply
+from .utils import (
+    assert_reply,
+    device_path_from_characteristic_path,
+    get_dbus_authenticator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +68,31 @@ class CallbackAndState(NamedTuple):
     adapter_path: str
     """
     The D-Bus object path of the adapter associated with the callback.
+    """
+
+
+DevicePropertiesChangedCallback = Callable[[Optional[Any]], None]
+"""
+A callback that is called when the properties of a device change in BlueZ.
+
+Args:
+    arg0: The new property value.
+"""
+
+
+class DeviceConditionCallback(NamedTuple):
+    """
+    Encapsulates a :data:`DevicePropertiesChangedCallback` and the property name being watched.
+    """
+
+    callback: DevicePropertiesChangedCallback
+    """
+    The callback.
+    """
+
+    property_name: str
+    """
+    The name of the property to watch.
     """
 
 
@@ -110,7 +140,6 @@ Args:
 
 
 class DeviceWatcher(NamedTuple):
-
     device_path: str
     """
     The D-Bus object path of the device.
@@ -167,11 +196,49 @@ class BlueZManager:
 
         self._advertisement_callbacks: List[CallbackAndState] = []
         self._device_removed_callbacks: List[DeviceRemovedCallbackAndState] = []
-        self._device_watchers: Set[DeviceWatcher] = set()
-        self._condition_callbacks: Set[Callable] = set()
+        self._device_watchers: Dict[str, Set[DeviceWatcher]] = {}
+        self._condition_callbacks: Dict[str, Set[DeviceConditionCallback]] = {}
         self._services_cache: Dict[str, BleakGATTServiceCollection] = {}
 
-    async def async_init(self):
+    def _check_adapter(self, adapter_path: str) -> None:
+        """
+        Raises:
+            BleakError: if adapter is not present in BlueZ
+        """
+        if adapter_path not in self._properties:
+            raise BleakError(f"adapter '{adapter_path.split('/')[-1]}' not found")
+
+    def _check_device(self, device_path: str) -> None:
+        """
+        Raises:
+            BleakError: if device is not present in BlueZ
+        """
+        if device_path not in self._properties:
+            raise BleakError(f"device '{device_path.split('/')[-1]}' not found")
+
+    def _get_device_property(
+        self, device_path: str, interface: str, property_name: str
+    ) -> Any:
+        self._check_device(device_path)
+        device_properties = self._properties[device_path]
+
+        try:
+            interface_properties = device_properties[interface]
+        except KeyError:
+            raise BleakError(
+                f"Interface {interface} not found for device '{device_path}'"
+            )
+
+        try:
+            value = interface_properties[property_name]
+        except KeyError:
+            raise BleakError(
+                f"Property '{property_name}' not found for '{interface}' in '{device_path}'"
+            )
+
+        return value
+
+    async def async_init(self) -> None:
         """
         Connects to the D-Bus message bus and begins monitoring signals.
 
@@ -185,9 +252,9 @@ class BlueZManager:
             self._services_cache = {}
 
             # We need to create a new MessageBus each time as
-            # dbus-next will destory the underlying file descriptors
+            # dbus-next will destroy the underlying file descriptors
             # when the previous one is closed in its finalizer.
-            bus = MessageBus(bus_type=BusType.SYSTEM)
+            bus = MessageBus(bus_type=BusType.SYSTEM, auth=get_dbus_authenticator())
             await bus.connect()
 
             try:
@@ -274,7 +341,8 @@ class BlueZManager:
                             desc_props["Characteristic"], set()
                         ).add(path)
 
-                logger.debug(f"initial properties: {self._properties}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("initial properties: %s", self._properties)
 
             except BaseException:
                 # if setup failed, disconnect
@@ -326,13 +394,15 @@ class BlueZManager:
 
         Returns:
             An async function that is used to stop scanning and remove the filters.
+
+        Raises:
+            BleakError: if the adapter is not present in BlueZ
         """
         async with self._bus_lock:
             # If the adapter doesn't exist, then the message calls below would
             # fail with "method not found". This provides a more informative
             # error message.
-            if adapter_path not in self._properties:
-                raise BleakError(f"adapter '{adapter_path.split('/')[-1]}' not found")
+            self._check_adapter(adapter_path)
 
             callback_and_state = CallbackAndState(advertisement_callback, adapter_path)
             self._advertisement_callbacks.append(callback_and_state)
@@ -385,20 +455,25 @@ class BlueZManager:
                                 member="StopDiscovery",
                             )
                         )
-                        assert_reply(reply)
 
-                        # remove the filters
-                        reply = await self._bus.call(
-                            Message(
-                                destination=defs.BLUEZ_SERVICE,
-                                path=adapter_path,
-                                interface=defs.ADAPTER_INTERFACE,
-                                member="SetDiscoveryFilter",
-                                signature="a{sv}",
-                                body=[{}],
+                        try:
+                            assert_reply(reply)
+                        except BleakDBusError as ex:
+                            if ex.dbus_error != "org.bluez.Error.NotReady":
+                                raise
+                        else:
+                            # remove the filters
+                            reply = await self._bus.call(
+                                Message(
+                                    destination=defs.BLUEZ_SERVICE,
+                                    path=adapter_path,
+                                    interface=defs.ADAPTER_INTERFACE,
+                                    member="SetDiscoveryFilter",
+                                    signature="a{sv}",
+                                    body=[{}],
+                                )
                             )
-                        )
-                        assert_reply(reply)
+                            assert_reply(reply)
 
                 return stop
             except BaseException:
@@ -427,13 +502,15 @@ class BlueZManager:
 
         Returns:
             An async function that is used to stop scanning and remove the filters.
+
+        Raises:
+            BleakError: if the adapter is not present in BlueZ
         """
         async with self._bus_lock:
             # If the adapter doesn't exist, then the message calls below would
             # fail with "method not found". This provides a more informative
             # error message.
-            if adapter_path not in self._properties:
-                raise BleakError(f"adapter '{adapter_path.split('/')[-1]}' not found")
+            self._check_adapter(adapter_path)
 
             callback_and_state = CallbackAndState(advertisement_callback, adapter_path)
             self._advertisement_callbacks.append(callback_and_state)
@@ -466,7 +543,7 @@ class BlueZManager:
                     and reply.error_name == "org.freedesktop.DBus.Error.UnknownMethod"
                 ):
                     raise BleakError(
-                        "passive scanning on Linux requires BlueZ >= 5.55 with --experimental enabled and Linux kernel >= 5.10"
+                        "passive scanning on Linux requires BlueZ >= 5.56 with --experimental enabled and Linux kernel >= 5.10"
                     )
 
                 assert_reply(reply)
@@ -475,7 +552,7 @@ class BlueZManager:
                 # won't use the monitor
                 self._bus.export(monitor_path, monitor)
 
-                async def stop():
+                async def stop() -> None:
                     # need to remove callbacks first, otherwise we get TxPower
                     # and RSSI properties removed during stop which causes
                     # incorrect advertisement data callbacks
@@ -529,12 +606,17 @@ class BlueZManager:
 
         Returns:
             A device watcher object that acts a token to unregister the watcher.
+
+        Raises:
+            BleakError: if the device is not present in BlueZ
         """
+        self._check_device(device_path)
+
         watcher = DeviceWatcher(
             device_path, on_connected_changed, on_characteristic_value_changed
         )
 
-        self._device_watchers.add(watcher)
+        self._device_watchers.setdefault(device_path, set()).add(watcher)
         return watcher
 
     def remove_device_watcher(self, watcher: DeviceWatcher) -> None:
@@ -545,10 +627,13 @@ class BlueZManager:
             The device watcher token that was returned by
             :meth:`add_device_watcher`.
         """
-        self._device_watchers.remove(watcher)
+        device_path = watcher.device_path
+        self._device_watchers[device_path].remove(watcher)
+        if not self._device_watchers[device_path]:
+            del self._device_watchers[device_path]
 
     async def get_services(
-        self, device_path: str, use_cached: bool
+        self, device_path: str, use_cached: bool, requested_services: Optional[Set[str]]
     ) -> BleakGATTServiceCollection:
         """
         Builds a new :class:`BleakGATTServiceCollection` from the current state.
@@ -560,10 +645,18 @@ class BlueZManager:
                 When ``True`` if there is a cached :class:`BleakGATTServiceCollection`,
                 the method will not wait for ``"ServicesResolved"`` to become true
                 and instead return the cached service collection immediately.
+            requested_services:
+                When given, only return services with UUID that is in the list
+                of requested services.
 
         Returns:
             A new :class:`BleakGATTServiceCollection`.
+
+        Raises:
+            BleakError: if the device is not present in BlueZ
         """
+        self._check_device(device_path)
+
         if use_cached:
             services = self._services_cache.get(device_path)
             if services is not None:
@@ -582,6 +675,12 @@ class BlueZManager:
 
             service = BleakGATTServiceBlueZDBus(service_props, service_path)
 
+            if (
+                requested_services is not None
+                and service.uuid not in requested_services
+            ):
+                continue
+
             services.add_service(service)
 
             for char_path in self._characteristic_map.get(service_path, set()):
@@ -597,7 +696,7 @@ class BlueZManager:
                     service.handle,
                     # "MTU" property was added in BlueZ 5.62, otherwise fall
                     # back to minimum MTU according to Bluetooth spec.
-                    char_props.get("MTU", 23) - 3,
+                    lambda: char_props.get("MTU", 23) - 3,
                 )
 
                 services.add_characteristic(char)
@@ -644,8 +743,11 @@ class BlueZManager:
 
         Returns:
             The current property value.
+
+        Raises:
+            BleakError: if the device is not present in BlueZ
         """
-        return self._properties[device_path][defs.DEVICE_INTERFACE]["Name"]
+        return self._get_device_property(device_path, defs.DEVICE_INTERFACE, "Name")
 
     def is_connected(self, device_path: str) -> bool:
         """
@@ -655,7 +757,7 @@ class BlueZManager:
             device_path: The D-Bus object path of the device.
 
         Returns:
-            The current property value.
+            The current property value or ``False`` if the device does not exist in BlueZ.
         """
         try:
             return self._properties[device_path][defs.DEVICE_INTERFACE]["Connected"]
@@ -667,23 +769,77 @@ class BlueZManager:
         Waits for the device services to be discovered.
 
         If a disconnect happens before the completion a BleakError exception is raised.
+
+        Raises:
+            BleakError: if the device is not present in BlueZ
         """
-        services_discovered_wait_task = asyncio.create_task(
-            self._wait_condition(device_path, "ServicesResolved", True)
-        )
-        device_disconnected_wait_task = asyncio.create_task(
-            self._wait_condition(device_path, "Connected", False)
-        )
-        done, pending = await asyncio.wait(
-            {services_discovered_wait_task, device_disconnected_wait_task},
-            return_when=asyncio.FIRST_COMPLETED,
+        self._check_device(device_path)
+
+        with contextlib.ExitStack() as stack:
+            services_discovered_wait_task = asyncio.create_task(
+                self._wait_condition(device_path, "ServicesResolved", True)
+            )
+            stack.callback(services_discovered_wait_task.cancel)
+
+            device_disconnected_wait_task = asyncio.create_task(
+                self._wait_condition(device_path, "Connected", False)
+            )
+            stack.callback(device_disconnected_wait_task.cancel)
+
+            # in some cases, we can get "InterfaceRemoved" without the
+            # "Connected" property changing, so we need to race against both
+            # conditions
+            device_removed_wait_task = asyncio.create_task(
+                self._wait_removed(device_path)
+            )
+            stack.callback(device_removed_wait_task.cancel)
+
+            done, _ = await asyncio.wait(
+                {
+                    services_discovered_wait_task,
+                    device_disconnected_wait_task,
+                    device_removed_wait_task,
+                },
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # check for exceptions
+            for task in done:
+                task.result()
+
+            if not done.isdisjoint(
+                {device_disconnected_wait_task, device_removed_wait_task}
+            ):
+                raise BleakError("failed to discover services, device disconnected")
+
+    async def _wait_removed(self, device_path: str) -> None:
+        """
+        Waits for the device interface to be removed.
+
+        If the device is not present in BlueZ, this returns immediately.
+
+        Args:
+            device_path: The D-Bus object path of a Bluetooth device.
+        """
+        if device_path not in self._properties:
+            return
+
+        event = asyncio.Event()
+
+        def callback(o: str) -> None:
+            if o == device_path:
+                event.set()
+
+        device_removed_callback_and_state = DeviceRemovedCallbackAndState(
+            callback, self._properties[device_path][defs.DEVICE_INTERFACE]["Adapter"]
         )
 
-        for p in pending:
-            p.cancel()
-
-        if device_disconnected_wait_task in done:
-            raise BleakError("failed to discover services, device disconnected")
+        with contextlib.ExitStack() as stack:
+            self._device_removed_callbacks.append(device_removed_callback_and_state)
+            stack.callback(
+                self._device_removed_callbacks.remove, device_removed_callback_and_state
+            )
+            await event.wait()
 
     async def _wait_condition(
         self, device_path: str, property_name: str, property_value: Any
@@ -695,31 +851,38 @@ class BlueZManager:
             device_path: The D-Bus object path of a Bluetooth device.
             property_name: The name of the property to test.
             property_value: A value to compare the current property value to.
+
+        Raises:
+            BleakError: if the device is not present in BlueZ
         """
-        if (
-            self._properties[device_path][defs.DEVICE_INTERFACE][property_name]
-            == property_value
-        ):
+        value = self._get_device_property(
+            device_path, defs.DEVICE_INTERFACE, property_name
+        )
+
+        if value == property_value:
             return
 
         event = asyncio.Event()
 
-        def callback():
-            if (
-                self._properties[device_path][defs.DEVICE_INTERFACE][property_name]
-                == property_value
-            ):
+        def _wait_condition_callback(new_value: Optional[Any]) -> None:
+            """Callback for when a property changes."""
+            if new_value == property_value:
                 event.set()
 
-        self._condition_callbacks.add(callback)
+        condition_callbacks = self._condition_callbacks
+        device_callbacks = condition_callbacks.setdefault(device_path, set())
+        callback = DeviceConditionCallback(_wait_condition_callback, property_name)
+        device_callbacks.add(callback)
 
         try:
             # can be canceled
             await event.wait()
         finally:
-            self._condition_callbacks.remove(callback)
+            device_callbacks.remove(callback)
+            if not device_callbacks:
+                del condition_callbacks[device_path]
 
-    def _parse_msg(self, message: Message):
+    def _parse_msg(self, message: Message) -> None:
         """
         Handles callbacks from dbus_fast.
         """
@@ -727,13 +890,14 @@ class BlueZManager:
         if message.message_type != MessageType.SIGNAL:
             return
 
-        logger.debug(
-            "received D-Bus signal: %s.%s (%s): %s",
-            message.interface,
-            message.member,
-            message.path,
-            message.body,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "received D-Bus signal: %s.%s (%s): %s",
+                message.interface,
+                message.member,
+                message.path,
+                message.body,
+            )
 
         # type hints
         obj_path: str
@@ -812,10 +976,16 @@ class BlueZManager:
                         del self._descriptor_map[obj_path]
                     except KeyError:
                         pass
-        elif message.member == "PropertiesChanged":
-            assert message.path is not None
 
+            # Remove empty properties when all interfaces have been removed.
+            # This avoids wasting memory for people who have noisy devices
+            # with private addresses that change frequently.
+            if obj_path in self._properties and not self._properties[obj_path]:
+                del self._properties[obj_path]
+        elif message.member == "PropertiesChanged":
             interface, changed, invalidated = message.body
+            message_path = message.path
+            assert message_path is not None
 
             try:
                 self_interface = self._properties[message.path][interface]
@@ -844,34 +1014,40 @@ class BlueZManager:
 
                 if interface == defs.DEVICE_INTERFACE:
                     # handle advertisement watchers
+                    device_path = message_path
 
                     self._run_advertisement_callbacks(
-                        message.path, cast(Device1, self_interface), changed.keys()
+                        device_path, cast(Device1, self_interface), changed.keys()
                     )
 
                     # handle device condition watchers
-                    for condition_callback in self._condition_callbacks:
-                        condition_callback()
+                    callbacks = self._condition_callbacks.get(device_path)
+                    if callbacks:
+                        for callback in callbacks:
+                            name = callback.property_name
+                            if name in changed:
+                                callback.callback(self_interface.get(name))
 
                     # handle device connection change watchers
-
                     if "Connected" in changed:
-                        for (
-                            device_path,
-                            on_connected_changed,
-                            _,
-                        ) in self._device_watchers.copy():
-                            # callbacks may remove the watcher, hence the copy() above
-                            if message.path == device_path:
-                                on_connected_changed(self_interface["Connected"])
+                        new_connected = self_interface["Connected"]
+                        watchers = self._device_watchers.get(device_path)
+                        if watchers:
+                            # callbacks may remove the watcher, hence the copy
+                            for watcher in watchers.copy():
+                                watcher.on_connected_changed(new_connected)
 
                 elif interface == defs.GATT_CHARACTERISTIC_INTERFACE:
                     # handle characteristic value change watchers
-
                     if "Value" in changed:
-                        for device_path, _, on_value_changed in self._device_watchers:
-                            if message.path.startswith(device_path):
-                                on_value_changed(message.path, self_interface["Value"])
+                        new_value = self_interface["Value"]
+                        device_path = device_path_from_characteristic_path(message_path)
+                        watchers = self._device_watchers.get(device_path)
+                        if watchers:
+                            for watcher in watchers:
+                                watcher.on_characteristic_value_changed(
+                                    message_path, new_value
+                                )
 
     def _run_advertisement_callbacks(
         self, device_path: str, device: Device1, changed: Iterable[str]
@@ -884,7 +1060,7 @@ class BlueZManager:
             device: The current D-Bus properties of the device.
             changed: A list of properties that have changed since the last call.
         """
-        for (callback, adapter_path) in self._advertisement_callbacks:
+        for callback, adapter_path in self._advertisement_callbacks:
             # filter messages from other adapters
             if adapter_path != device["Adapter"]:
                 continue

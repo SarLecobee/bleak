@@ -9,11 +9,18 @@ import abc
 import asyncio
 import os
 import platform
+import sys
 import uuid
 from typing import Callable, Optional, Type, Union
 from warnings import warn
 
 from ..agent import BaseBleakAgentCallbacks
+
+if sys.version_info < (3, 12):
+    from typing_extensions import Buffer
+else:
+    from collections.abc import Buffer
+
 from ..exc import BleakError
 from .characteristic import BleakGATTCharacteristic
 from .device import BLEDevice
@@ -43,12 +50,12 @@ class BaseBleakClient(abc.ABC):
         else:
             self.address = address_or_ble_device
 
-        self.services = BleakGATTServiceCollection()
-
-        self._services_resolved = False
+        self.services: Optional[BleakGATTServiceCollection] = None
 
         self._timeout = kwargs.get("timeout", 10.0)
-        self._disconnected_callback = kwargs.get("disconnected_callback")
+        self._disconnected_callback: Optional[Callable[[], None]] = kwargs.get(
+            "disconnected_callback"
+        )
 
     def close(self):
         pass
@@ -62,22 +69,12 @@ class BaseBleakClient(abc.ABC):
     # Connectivity methods
 
     def set_disconnected_callback(
-        self, callback: Optional[Callable[["BaseBleakClient"], None]], **kwargs
+        self, callback: Optional[Callable[[], None]], **kwargs
     ) -> None:
         """Set the disconnect callback.
         The callback will only be called on unsolicited disconnect event.
 
-        Callbacks must accept one input which is the client object itself.
-
         Set the callback to ``None`` to remove any existing callback.
-
-        .. code-block:: python
-
-            def callback(client):
-                print("Client with address {} got disconnected!".format(client.address))
-
-            client.set_disconnected_callback(callback)
-            client.connect()
 
         Args:
             callback: callback to be called on disconnection.
@@ -199,31 +196,27 @@ class BaseBleakClient(abc.ABC):
     @abc.abstractmethod
     async def write_gatt_char(
         self,
-        char_specifier: Union[BleakGATTCharacteristic, int, str, uuid.UUID],
-        data: Union[bytes, bytearray, memoryview],
-        response: bool = False,
+        characteristic: BleakGATTCharacteristic,
+        data: Buffer,
+        response: bool,
     ) -> None:
-        """Perform a write operation on the specified GATT characteristic.
+        """
+        Perform a write operation on the specified GATT characteristic.
 
         Args:
-            char_specifier (BleakGATTCharacteristic, int, str or UUID): The characteristic to write
-                to, specified by either integer handle, UUID or directly by the
-                BleakGATTCharacteristic object representing it.
-            data (bytes or bytearray): The data to send.
-            response (bool): If write-with-response operation should be done. Defaults to `False`.
-
+            characteristic: The characteristic to write to.
+            data: The data to send.
+            response: If write-with-response operation should be done.
         """
         raise NotImplementedError()
 
     @abc.abstractmethod
-    async def write_gatt_descriptor(
-        self, handle: int, data: Union[bytes, bytearray, memoryview]
-    ) -> None:
+    async def write_gatt_descriptor(self, handle: int, data: Buffer) -> None:
         """Perform a write operation on the specified GATT descriptor.
 
         Args:
-            handle (int): The handle of the descriptor to read from.
-            data (bytes or bytearray): The data to send.
+            handle: The handle of the descriptor to read from.
+            data: The data to send (any bytes-like object).
 
         """
         raise NotImplementedError()

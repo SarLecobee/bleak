@@ -43,7 +43,8 @@ class Agent(ServiceInterface):
         manager = await get_global_bluez_manager()
         props = manager.get_device_props(device_path)
         return BLEDevice(
-            props["Address"], props["Alias"], {"path": device_path, "props": props}
+            props["Address"], props["Alias"], {"path": device_path, "props": props},
+            props.get("RSSI", -127)
         )
 
     @method()

@@ -10,7 +10,7 @@ import asyncio
 import logging
 import sys
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 if sys.version_info < (3, 11):
     from async_timeout import timeout as async_timeout
@@ -19,6 +19,7 @@ else:
 
 import objc
 from CoreBluetooth import (
+    CBUUID,
     CBCentralManager,
     CBManagerStatePoweredOff,
     CBManagerStatePoweredOn,
@@ -27,9 +28,9 @@ from CoreBluetooth import (
     CBManagerStateUnknown,
     CBManagerStateUnsupported,
     CBPeripheral,
-    CBUUID,
 )
 from Foundation import (
+    NSUUID,
     NSArray,
     NSDictionary,
     NSError,
@@ -38,9 +39,8 @@ from Foundation import (
     NSNumber,
     NSObject,
     NSString,
-    NSUUID,
 )
-from libdispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+from libdispatch import DISPATCH_QUEUE_SERIAL, dispatch_queue_create
 
 from ...exc import BleakError
 
@@ -103,14 +103,20 @@ class CentralManagerDelegate(NSObject):
 
         return self
 
-    def __del__(self):
+    def __del__(self) -> None:
         if objc.macos_available(10, 13):
-            self.central_manager.removeObserver_forKeyPath_(self, "isScanning")
+            try:
+                self.central_manager.removeObserver_forKeyPath_(self, "isScanning")
+            except IndexError:
+                # If self.init() raised an exception before calling
+                # addObserver_forKeyPath_options_context_, attempting
+                # to remove the observer will fail with IndexError
+                pass
 
     # User defined functions
 
     @objc.python_method
-    async def start_scan(self, service_uuids) -> None:
+    async def start_scan(self, service_uuids: Optional[List[str]]) -> None:
         service_uuids = (
             NSArray.alloc().initWithArray_(
                 list(map(CBUUID.UUIDWithString_, service_uuids))
@@ -152,7 +158,7 @@ class CentralManagerDelegate(NSObject):
         self,
         peripheral: CBPeripheral,
         disconnect_callback: DisconnectCallback,
-        timeout=10.0,
+        timeout: float = 10.0,
     ) -> None:
         try:
             self._disconnect_callbacks[peripheral.identifier()] = disconnect_callback

@@ -10,17 +10,167 @@ and this project adheres to `Semantic Versioning <https://semver.org/spec/v2.0.0
 `Unreleased`_
 =============
 
+`0.22.2`_ (2024-06-01)
+======================
+
+Changed
+-------
+* Retrieve the BLE address required by ``BleakClientWinRT`` from scan response if advertising is None (WinRT).
+* Changed type hint for ``adv`` attribute of ``bleak.backends.winrt.scanner._RawAdvData``.
+* ``BleakGATTCharacteristic.max_write_without_response_size`` is now dynamic.
+
+Fixed
+-----
+* Fixed ``discovered_devices_and_advertisement_data`` returning devices that should
+  be filtered out by service UUIDs. Fixes #1576.
+* Fixed a ``Descriptor None was not found!`` exception occurring in ``start_notify()`` on Android. Fixes #823.
+* Fixed exception raised when starting ``BleakScanner`` while running in a Windows GUI app.
+
+`0.22.1`_ (2024-05-07)
+======================
+
 Added
 -----
-* Added ``BleakClient.close()`` method.
+* Added ``bleak.backends.winrt.util.allow_sta()`` method to allow integration
+  with graphical user interfaces on Windows. Fixes #1565.
 
+`0.22.0`_ (2024-05-04)
+======================
+
+Added
+-----
+* Added ``BleakCharacteristicNotFoundError`` which is raised if a device does not support a characteristic.
+* Added utility function to work around ``pywin32`` setting threading model to STA on Windows.
+
+Changed
+-------
+* Updated PyObjC dependency on macOS to v10.x.
+* Updated missing Bluetooth SIG characteristics and service UUIDs.
+* Updated ``BlueZManager`` to remove empty interfaces from `_properties` during InterfacesRemoved message.
+* Updated PyWinRT dependency to v2. Fixes #1529.
+* Raise exception when trying to scan while in a single-treaded apartment (STA) on Windows. Fixes #1132.
+
+Fixed
+-----
+* Fixed BlueZ version in passive scanning error message. Fixes #1433.
+* Fixed mypy requiring ``Unpack[ExtraArgs]`` that were intended to be optional.  Fixes #1487.
+* Fixed ``KeyError`` in BlueZ ``is_connected()`` and ``get_global_bluez_manager()`` when device is not present. Fixes #1507.
+* Fixed BlueZ ``_wait_removed`` completion on invalid object path. Fixes #1489.
+* Fixed rare unhandled exception when scanning on macOS when using ``use_bdaddr``. Fixes #1523.
+* Fixed scanning silently failing on Windows when Bluetooth is off. Fixes #1535.
+* Fixed using wrong value for ``tx_power`` in Android backend. Fixes #1532.
+* Fixed 4-character UUIDs not working on ``BleakClient.*_gatt_char`` methods. Fixes #1498.
+* Fixed race condition with getting max PDU size on Windows. Fixes #1497. [REVERTED in v0.22.2]
+* Fixed filtering advertisement data by service UUID when multiple apps are scanning. Fixes #1534.
+
+`0.21.1`_ (2023-09-08)
+======================
+
+Changed
+-------
+* Changed ``dbus-fast`` dependency to include v2.x. Fixes #1412.
+
+`0.21.0`_ (2023-09-02)
+======================
+
+Added
+-----
+* Added ``bleak.uuids.normalize_uuid_16()`` function.
+* Added ``bleak.uuids.normalize_uuid_32()`` function.
+* Added ``advertisement_data()`` async iterator method to ``BleakScanner``. Merged #1361.
+* Added type hints for kwargs on ``BleakScanner`` class methods.
+* Added support for Python 3.12.
+
+Changed
+-------
+* Improved error messages when failing to get services in WinRT backend.
+* Improved error messages with enum values in WinRT backend. Fixes #1284.
+* Scanner backends modified to allow multiple advertisement callbacks. Merged #1367.
+* Changed default handling of the ``response`` argument in ``BleakClient.write_gatt_char``.
+  Fixes #909.
+* Bleak recipe now automatically installs bleak from GitHub release in Kivy example.
+* Changed `BlueZManager` methods to raise `BleakError` when device is not in BlueZ.
+* Optimized BlueZ backend device watchers and condition callbacks to avoid linear searches.
+* Changed type hint for buffer protocol to ``collections.abc.Buffer``.
+
+Fixed
+-----
+* Fixed handling all access denied errors when enumerating characteristics on Windows. Fixes #1291.
+* Added support for 32bit UUIDs. Fixes #1314.
+* Fixed typing for ``BaseBleakScanner`` detection callback.
+* Fixed possible crash in ``_stopped_handler()`` in WinRT backend. Fixes #1330.
+* Reduced expensive logging in the BlueZ backend. Merged #1376.
+* Fixed race condition with ``"InterfaceRemoved"`` when getting services in BlueZ backend.
+* Fixed missing permissions and requirements in android Kivy example. Fixes #1184.
+* Fixed WinRT backend sometimes hanging forever when a device goes out of range during connection. Fixes #1359.
+
+Removed
+-------
+Dropped support for Python 3.7.
+
+`0.20.2`_ (2023-04-19)
+======================
+
+Fixed
+-----
+* Fixed ``org.bluez.Error.InProgress`` in characteristic and descriptor read and
+  write methods in BlueZ backend.
+* Fixed ``OSError: [WinError -2147483629] The object has been closed`` when
+  connecting on Windows. Fixes #1280.
+
+`0.20.1`_ (2023-03-24)
+======================
+
+Fixed
+-----
+* Fixed possible garbage collection of running async callback from ``BleakClient.start_notify()``.
+* Fixed possible garbage collection of running async callback from ``BleakScanner(detection_callback=)``.
+* Fixed possible garbage collection of disconnect monitor in BlueZ backend. Fixed #1258.
+
+`0.20.0`_ (2023-03-17)
+======================
+
+Added
+-----
+* Added ``BLEAK_DBUS_AUTH_UID`` environment variable for hardcoding D-Bus UID. Merged #1182.
+* Added return type ``None`` to some scanner methods.
+* Added optional hack to use Bluetooth address instead of UUID on macOS. Merged #1073.
+* Added ``BleakScanner.find_device_by_name()`` class method.
+* Added optional command line argument to use debug log level to all applicable examples.
+* Added ``bleak.uuids.normalize_uuid_str()`` function.
+* Added optional ``services`` argument to ``BleakClient()`` to filter services. Merged #654.
+* Added automatic retry on ``le-connection-abort-by-local`` in BlueZ backend. Fixes #1220.
 
 Changed
 -------
 * Dropped ``async-timeout`` dependency on Python >= 3.11.
 * Deprecated ``BLEDevice.rssi`` and ``BLEDevice.metadata``. Fixes #1025.
-* ``BLEDevice`` now uses ``__slots__`` to reduce memory usage.
-* BlueZ no longer closes D-Bus socket on disconnect of ``BleakClient``.
+* ``BLEDevice`` now uses ``__slots__`` to reduce memory usage. Merged #1117.
+* ``BaseBleakClient.services`` is now ``None`` instead of empty service collection
+  until services are discovered.
+* Include thread name in ``BLEAK_LOGGING`` output. Merged #1144.
+* Updated PyObjC dependency on macOS to v9.x.
+
+Fixed
+-----
+* Fixed invalid UTF-8 in ``uuids.uuid16_dict``.
+* Fixed ``AttributeError`` in ``_ensure_success`` in WinRT backend.
+* Fixed ``BleakScanner.stop()`` can raise ``BleakDBusError`` with ``org.bluez.Error.NotReady`` in BlueZ backend.
+* Fixed ``BleakScanner.stop()`` hanging in WinRT backend when Bluetooth is disabled.
+* Fixed leaking services when ``get_services()`` is cancelled in WinRT backend.
+* Fixed disconnect monitor task not always cancelled on the BlueZ client. Merged #1159.
+* Fixed WinRT scanner never calling ``detection_callback`` when a device does
+  not send a scan response. Fixes #1211.
+* Fixed ``BLEDevice`` name sometimes incorrectly ``None``.
+* Fixed unhandled exception in ``CentralManagerDelegate`` destructor on macOS. Fixes #1219.
+* Fixed object passed to ``disconnected_callback`` is not ``BleakClient``. Fixes #1200.
+
+`0.19.5`_ (2022-11-19)
+======================
+
+Fixed
+-----
+* Fixed more issues with getting services in WinRT backend.
 
 
 `0.19.4`_ (2022-11-06)
@@ -889,7 +1039,16 @@ Fixed
 * Bleak created.
 
 
-.. _Unreleased: https://github.com/hbldh/bleak/compare/v0.19.4...develop
+.. _Unreleased: https://github.com/hbldh/bleak/compare/v0.22.2...develop
+.. _0.22.2: https://github.com/hbldh/bleak/compare/v0.22.1...v0.22.2
+.. _0.22.1: https://github.com/hbldh/bleak/compare/v0.22.0...v0.22.1
+.. _0.22.0: https://github.com/hbldh/bleak/compare/v0.21.1...v0.22.0
+.. _0.21.1: https://github.com/hbldh/bleak/compare/v0.21.0...v0.21.1
+.. _0.21.0: https://github.com/hbldh/bleak/compare/v0.20.2...v0.21.0
+.. _0.20.2: https://github.com/hbldh/bleak/compare/v0.20.1...v0.20.2
+.. _0.20.1: https://github.com/hbldh/bleak/compare/v0.20.0...v0.20.1
+.. _0.20.0: https://github.com/hbldh/bleak/compare/v0.19.5...v0.20.0
+.. _0.19.5: https://github.com/hbldh/bleak/compare/v0.19.4...v0.19.5
 .. _0.19.4: https://github.com/hbldh/bleak/compare/v0.19.3...v0.19.4
 .. _0.19.3: https://github.com/hbldh/bleak/compare/v0.19.2...v0.19.3
 .. _0.19.2: https://github.com/hbldh/bleak/compare/v0.19.1...v0.19.2
