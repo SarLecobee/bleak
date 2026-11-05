@@ -128,9 +128,11 @@ class Agent(ServiceInterface):
 async def bluez_agent(bus: MessageBus, callbacks: BaseBleakAgentCallbacks):
     agent = Agent(callbacks)
 
-    # REVISIT: implement passing capability if needed
-    # "DisplayOnly", "DisplayYesNo", "KeyboardOnly", "NoInputNoOutput", "KeyboardDisplay"
-    capability = ""
+    # An empty capability makes BlueZ advertise DisplayYesNo, which cannot satisfy MITM
+    # passkey pairing with a DisplayOnly peer (peer rejects with "Authentication requirements").
+    # KeyboardOnly always results in Passkey Entry, handled by RequestPasskey -> request_pin.
+    # Options: "DisplayOnly", "DisplayYesNo", "KeyboardOnly", "NoInputNoOutput", "KeyboardDisplay"
+    capability = "KeyboardOnly"
 
     # this should be a unique path to allow multiple python interpreters
     # running bleak and multiple agents at the same time
