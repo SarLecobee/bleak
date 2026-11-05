@@ -155,6 +155,23 @@ async def bluez_agent(bus: MessageBus, callbacks: BaseBleakAgentCallbacks):
         assert_reply(reply)
 
         try:
+            # When the LE link is already connected, BlueZ triggers pairing by raising
+            # security on the existing connection instead of sending MGMT Pair Device, so
+            # the kernel uses the adapter's IO capability (from the *default* agent) rather
+            # than this agent's. Make this agent the default so its capability is used.
+            reply = await bus.call(
+                Message(
+                    destination=defs.BLUEZ_SERVICE,
+                    path="/org/bluez",
+                    interface=defs.AGENT_MANAGER_INTERFACE,
+                    member="RequestDefaultAgent",
+                    signature="o",
+                    body=[agent_path],
+                )
+            )
+
+            assert_reply(reply)
+
             yield
         finally:
             reply = await bus.call(
